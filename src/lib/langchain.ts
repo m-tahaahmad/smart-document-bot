@@ -1,7 +1,5 @@
 // lib/langchain.ts
 import { ChatGroq } from "@langchain/groq";
-import { BufferMemory } from "langchain/memory";
-import { ConversationChain } from "langchain/chains";
 import { FakeEmbeddings } from "@langchain/core/utils/testing";
 
 export async function createGroqAgent() {
@@ -17,13 +15,7 @@ export async function createGroqAgent() {
     const embeddings = new FakeEmbeddings();
     console.log("Using fake embeddings for fast processing");
 
-    // 3️⃣ Memory
-    const memory = new BufferMemory({
-        memoryKey: "chat_history",
-        returnMessages: true,
-    });
-
-    // 4️⃣ Return llm and chain separately
+    // 3️⃣ Return llm and chain separately
     const chain = llm;
 
     return { chain, embeddings, llm };

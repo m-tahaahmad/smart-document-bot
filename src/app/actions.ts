@@ -3,30 +3,110 @@
 import { createGroqAgent } from "@/lib/langchain";
 import { MemoryVectorStore } from "langchain/vectorstores/memory";
 import { createRequire } from "module";
+import { ChatGroq } from "@langchain/groq";
+import { FakeEmbeddings } from "@langchain/core/utils/testing";
 
 const require = createRequire(import.meta.url);
 
 let sessionCache: {
     vectorStore?: MemoryVectorStore;
-    chain?: any;
-    embeddings?: any;
-    llm?: any;
+    chain?: ChatGroq;
+    embeddings?: FakeEmbeddings;
+    llm?: ChatGroq;
 } = {};
 
 async function extractText(file: File): Promise<string> {
     const buffer = Buffer.from(await file.arrayBuffer());
 
     if (file.type === "application/pdf") {
+        // First, try with pdf-parse
         try {
-            // Use require() for CommonJS modules
             const pdf = require("pdf-parse");
             const pdfData = await pdf(buffer);
+            
             if (!pdfData.text || pdfData.text.trim().length === 0) {
                 throw new Error("PDF appears to be empty or contains no extractable text");
             }
             return pdfData.text;
         } catch (error) {
-            throw new Error(`Failed to parse PDF. The file may be corrupted or protected: ${error instanceof Error ? error.message : String(error)}`);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            
+            // If it's an XRef error, try fallback method with pdf2json
+            if (errorMessage.includes("XRef") || errorMessage.includes("xref")) {
+                try {
+                    // Try fallback with pdf2json - more robust with problematic PDFs
+                    const PDFParser = require("pdf2json");
+                    const pdfParser = new PDFParser(null, 1);
+                    
+                    return new Promise<string>((resolve, reject) => {
+                        // Set a timeout to prevent hanging
+                        const timeout = setTimeout(() => {
+                            reject(new Error("PDF parsing timeout - the file may be too large or corrupted"));
+                        }, 30000); // 30 second timeout
+                        
+                        pdfParser.on("pdfParser_dataError", (errData: { parserError: string }) => {
+                            clearTimeout(timeout);
+                            reject(new Error(`PDF parsing error: ${errData.parserError}`));
+                        });
+                        
+                        pdfParser.on("pdfParser_dataReady", (pdfData: { Pages: Array<{ Texts: Array<{ R: Array<{ T: string }> }> }> }) => {
+                            clearTimeout(timeout);
+                            try {
+                                let fullText = "";
+                                
+                                // Extract text from all pages
+                                if (pdfData.Pages && Array.isArray(pdfData.Pages)) {
+                                    for (const page of pdfData.Pages) {
+                                        if (page.Texts && Array.isArray(page.Texts)) {
+                                            for (const text of page.Texts) {
+                                                if (text.R && Array.isArray(text.R)) {
+                                                    for (const run of text.R) {
+                                                        if (run.T) {
+                                                            // Decode URI-encoded text
+                                                            try {
+                                                                fullText += decodeURIComponent(run.T) + " ";
+                                                            } catch {
+                                                                // If decode fails, use the text as-is
+                                                                fullText += run.T + " ";
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            fullText += "\n";
+                                        }
+                                    }
+                                }
+                                
+                                if (!fullText || fullText.trim().length === 0) {
+                                    reject(new Error("PDF appears to be empty or contains no extractable text"));
+                                } else {
+                                    resolve(fullText.trim());
+                                }
+                            } catch (parseError) {
+                                reject(new Error(`Failed to extract text from PDF: ${parseError instanceof Error ? parseError.message : String(parseError)}`));
+                            }
+                        });
+                        
+                        // Parse the buffer
+                        pdfParser.parseBuffer(buffer);
+                    });
+                } catch (fallbackError) {
+                    // If fallback also fails, provide helpful error message
+                    const fallbackErrorMsg = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+                    throw new Error(
+                        "PDF parsing failed due to file structure issues (bad XRef entry). " +
+                        "This may happen with certain PDF formats. " +
+                        "Please try: 1) Re-saving the PDF in a different application, " +
+                        "2) Converting to DOCX or TXT format, or 3) Using a different PDF file. " +
+                        `Technical details: ${errorMessage}. Fallback error: ${fallbackErrorMsg}`
+                    );
+                }
+            } else if (errorMessage.includes("password") || errorMessage.includes("encrypted")) {
+                throw new Error("This PDF appears to be password-protected or encrypted. Please remove the password and try again.");
+            } else {
+                throw new Error(`Failed to parse PDF. The file may be corrupted or in an unsupported format: ${errorMessage}`);
+            }
         }
     } else if (file.type === "text/plain") {
         return buffer.toString("utf-8");
@@ -127,7 +207,25 @@ Answer:`;
         { role: "user", content: userMessage }
     ]);
 
-    // Handle different response formats
-    const answer = typeof response === 'string' ? response : (response.content || response.response || JSON.stringify(response));
+    // Handle different response formats - ensure we always return a string
+    let answer: string;
+    if (typeof response === 'string') {
+        answer = response;
+    } else {
+        const content = response.content;
+        if (typeof content === 'string') {
+            answer = content;
+        } else if (Array.isArray(content)) {
+            answer = content.map(part => {
+                if (typeof part === 'string') return part;
+                if (typeof part === 'object' && part !== null && 'text' in part) {
+                    return String(part.text);
+                }
+                return '';
+            }).join('');
+        } else {
+            answer = String(content) || JSON.stringify(response);
+        }
+    }
     return answer;
 }
