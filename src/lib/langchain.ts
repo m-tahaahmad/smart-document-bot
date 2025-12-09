@@ -7,7 +7,7 @@ import { FakeEmbeddings } from "@langchain/core/utils/testing";
 export async function createGroqAgent() {
     // 1️⃣ LLM
     const llm = new ChatGroq({
-        apiKey: process.env.GROQ_API_KEY!,
+        apiKey: process.env.NEXT_PUBLIC_GROQ_API_KEY!,
         model: "llama-3.1-8b-instant", // Updated to current model
         temperature: 0.3,
     });
